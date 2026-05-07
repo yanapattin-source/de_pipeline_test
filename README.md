@@ -158,6 +158,30 @@ docker compose down
 docker compose down -v
 ```
 
+## Security Note
+
+This project uses hardcoded credentials (`pipeline123`) in `docker-compose.yml` and `load_to_postgres.py` for simplicity. These are **intentionally simple demo credentials** — not secrets worth protecting.
+
+**If you plan to reuse or fork this project:**
+
+1. **Change the default password** — replace `pipeline123` in these locations:
+   - `docker-compose.yml` → `POSTGRES_PASSWORD` and `MAGE_DATABASE_CONNECTION_URL`
+   - `mage/sensor_pipeline/data_exporters/load_to_postgres.py` → `DB_URL` fallback string
+   - `mage/sensor_pipeline/io_config.yaml` → PostgreSQL password
+
+2. **Use environment variables** — create a `.env` file (already gitignored):
+   ```bash
+   # .env
+   POSTGRES_PASSWORD=your_secure_password
+   ```
+   Then reference it in `docker-compose.yml`:
+   ```yaml
+   environment:
+     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+   ```
+
+3. **Never commit real credentials** — the `.gitignore` already excludes `.env`
+
 ## Project Structure
 
 ```
