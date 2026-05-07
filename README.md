@@ -1,4 +1,5 @@
 # Pipeline Test — Sensor Data Pipeline
+### This Readme.md Co-Writing with AI
 
 A containerized data pipeline that generates sensor reading data and loads it into a PostgreSQL star schema, orchestrated by Mage.ai.
 
