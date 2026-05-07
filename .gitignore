@@ -4,5 +4,4 @@ __pycache__/
 .env
 .DS_Store
 .ipynb_checkpoints/
-*.ipynb
 mage/sensor_pipeline/.terraform/
