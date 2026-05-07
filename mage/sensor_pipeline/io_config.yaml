@@ -1,0 +1,11 @@
+version: 0.1.1
+profiles:
+  default:
+    postgres:
+      connector: postgres
+      config:
+        host: postgres
+        port: 5432
+        database: sensor_db
+        user: pipeline
+        password: pipeline123

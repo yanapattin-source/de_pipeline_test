@@ -1,0 +1,8 @@
+data_sample/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+.ipynb_checkpoints/
+*.ipynb
+mage/sensor_pipeline/.terraform/

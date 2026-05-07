@@ -1,0 +1,36 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: sensor_db
+      POSTGRES_USER: pipeline
+      POSTGRES_PASSWORD: pipeline123
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pipeline -d sensor_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mage:
+    build: .
+    environment:
+      MAGE_DATABASE_CONNECTION_URL: postgresql+psycopg2://pipeline:pipeline123@postgres:5432/sensor_db
+    ports:
+      - "6789:6789"
+    volumes:
+      - ./mage:/home/src
+      - ./data_sample:/home/src/data_sample:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["mage", "start", "sensor_pipeline"]
+
+volumes:
+  pgdata:

@@ -1,0 +1,10 @@
+name: load_sensor_data
+uuid: load_sensor_data
+type: python
+blocks:
+  - name: load_parquet_batch
+    type: data_loader
+  - name: normalize_sensor_data
+    type: transformer
+  - name: load_to_postgres
+    type: data_exporter
