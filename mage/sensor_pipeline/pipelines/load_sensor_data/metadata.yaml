@@ -1,10 +1,30 @@
-name: load_sensor_data
-uuid: load_sensor_data
-type: python
 blocks:
-  - name: load_parquet_batch
+  - all_upstream_blocks_executed: true
+    downstream_blocks:
+      - normalize_sensor_data
+    name: load_parquet_batch
+    status: not_executed
     type: data_loader
-  - name: normalize_sensor_data
+    upstream_blocks: []
+    uuid: load_parquet_batch
+  - all_upstream_blocks_executed: true
+    downstream_blocks:
+      - load_to_postgres
+    name: normalize_sensor_data
+    status: not_executed
     type: transformer
-  - name: load_to_postgres
+    upstream_blocks:
+      - load_parquet_batch
+    uuid: normalize_sensor_data
+  - all_upstream_blocks_executed: true
+    downstream_blocks: []
+    name: load_to_postgres
+    status: not_executed
     type: data_exporter
+    upstream_blocks:
+      - normalize_sensor_data
+    uuid: load_to_postgres
+name: load_sensor_data
+type: python
+uuid: load_sensor_data
+widgets: []

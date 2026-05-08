@@ -1,6 +1,7 @@
 import os
 import pandas as pd
-from sqlalchemy import create_engine, text, Table, MetaData, insert
+from sqlalchemy import bindparam, create_engine, text, Table, MetaData
+from sqlalchemy.dialects.postgresql import insert
 
 if 'data_exporter' not in globals():
     from mage_ai.data_preparation.decorators import data_exporter
@@ -27,18 +28,18 @@ def get_or_create_ids(
 
     tbl = Table(table_name, metadata, autoload_with=engine)
 
-    with engine.connect() as conn:
+    with engine.begin() as conn:
         # Parameterized bulk upsert — no SQL injection risk
         stmt = insert(tbl).values([{name_col: n} for n in names])
         stmt = stmt.on_conflict_do_nothing(index_elements=[name_col])
         conn.execute(stmt)
-        conn.commit()
 
         # Fetch all IDs for the names we care about
-        result = conn.execute(text(
+        query = text(
             f"SELECT {name_col}, {id_col} FROM {table_name} "
             f"WHERE {name_col} IN :names"
-        ), {"names": tuple(names)})
+        ).bindparams(bindparam("names", expanding=True))
+        result = conn.execute(query, {"names": names})
 
         return {row[0]: row[1] for row in result}
 
@@ -70,21 +71,21 @@ def load_to_postgres(data: dict, **kwargs) -> dict:
     sensor_df["department_id"] = sensor_df["department_name"].map(dept_map)
 
     dim_sensor_tbl = Table("dim_sensor", metadata, autoload_with=engine)
-    with engine.connect() as conn:
+    with engine.begin() as conn:
         sensor_records = sensor_df[["sensor_serial", "department_id"]].to_dict("records")
         stmt = insert(dim_sensor_tbl).values(sensor_records)
         stmt = stmt.on_conflict_do_nothing(
             index_elements=["sensor_serial", "department_id"],
         )
         conn.execute(stmt)
-        conn.commit()
 
         # Build sensor map using composite key
         serials = sensor_df["sensor_serial"].unique().tolist()
-        result = conn.execute(text(
+        query = text(
             "SELECT sensor_serial, department_id, sensor_id FROM dim_sensor "
             "WHERE sensor_serial IN :serials"
-        ), {"serials": tuple(serials)})
+        ).bindparams(bindparam("serials", expanding=True))
+        result = conn.execute(query, {"serials": serials})
         sensor_map = {(row[0], row[1]): row[2] for row in result}
 
     # --- Build fact DataFrame with foreign keys ---
