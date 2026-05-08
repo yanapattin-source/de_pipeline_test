@@ -1,4 +1,5 @@
-FROM mageai/mageai:latest
+ARG MAGEAI_VERSION=0.9.79
+FROM mageai/mageai:${MAGEAI_VERSION}
 
 # Install Python deps
 COPY requirements.txt /app/requirements.txt

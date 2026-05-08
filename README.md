@@ -32,18 +32,20 @@ This creates ~44,640 Parquet files in `data_sample/` (~78M rows of sensor data f
 ### 2. Start Infrastructure
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
 This starts:
 - **PostgreSQL** on port 5432 (schema auto-created on first start)
 - **Mage.ai** on port 6789 (web UI, authentication disabled for local dev)
 
-> **Note:** Authentication is disabled via `REQUIRE_USER_AUTHENTICATION=0` in docker-compose.yml. No login screen — Mage opens directly.
+> **Note:** Authentication is disabled via `REQUIRE_USER_AUTHENTICATION=0` in `docker-compose.yml`. Mage should open directly, and logging in is not required.
 
 ### 3. Run the Pipeline
 
-Open Mage UI at **http://localhost:6789**
+Open Mage UI at **http://localhost:6789/overview**
+
+If your browser is stuck on `/sign-in`, hard-refresh or clear site data for `localhost:6789`, then open `/overview` again. With auth disabled, Mage does not create a local user, so `admin@admin.com` / `admin` can fail even though the UI/API is usable without login.
 
 1. Go to **Pipelines** → **load_sensor_data**
 2. Click **Run**
@@ -84,6 +86,36 @@ See [`diagrams/schema.md`](diagrams/schema.md) for the full ER diagram (Mermaid 
 3. **load_to_postgres** (data_exporter) — receives the dict, upserts dimensions, bulk-inserts facts into PostgreSQL
 
 Runtime variables (like `day`) are passed via `**kwargs` in each block's function signature.
+
+## Mage Login / Authentication Troubleshooting
+
+This repo pins Mage to `0.9.79` for reproducible behavior. The effective auth setting is controlled by the Docker environment variable in `docker-compose.yml`, not by Mage project YAML files.
+
+Check the running server setting:
+
+```bash
+curl -s http://localhost:6789/api/statuses | python -m json.tool | grep require_user_authentication
+```
+
+Expected for local dev:
+
+```json
+"require_user_authentication": false
+```
+
+If you actually want a login screen, change `REQUIRE_USER_AUTHENTICATION` to `"1"` in `docker-compose.yml`, then restart Mage:
+
+```bash
+docker compose up -d --build --force-recreate mage
+```
+
+Default local owner credentials are configured in `docker-compose.yml`:
+
+| Field | Value |
+|-------|-------|
+| Email | `admin@admin.com` |
+| Username | `admin` |
+| Password | `admin` |
 
 ## Extending the Pipeline
 
