@@ -11,7 +11,7 @@ DB_URL = os.environ.get(
     "postgresql+psycopg2://pipeline:pipeline123@postgres:5432/sensor_db",
 )
 
-engine = create_engine(DB_URL)
+engine = create_engine(DB_URL, connect_args={"options": "-c search_path=warehouse"})
 metadata = MetaData()
 
 

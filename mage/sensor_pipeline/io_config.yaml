@@ -2,7 +2,7 @@ version: 0.1.1
 default:
   POSTGRES_CONNECT_TIMEOUT: 10
   POSTGRES_DBNAME: sensor_db
-  POSTGRES_SCHEMA: public
+  POSTGRES_SCHEMA: warehouse
   POSTGRES_USER: pipeline
   POSTGRES_PASSWORD: pipeline123
   POSTGRES_HOST: postgres
