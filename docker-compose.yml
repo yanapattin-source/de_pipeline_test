@@ -21,6 +21,9 @@ services:
   mage:
     build: .
     environment:
+      USER_CODE_PATH: /home/src/sensor_pipeline
+      ENV: dev
+      REQUIRE_USER_AUTHENTICATION: "0"
       MAGE_DATABASE_CONNECTION_URL: postgresql+psycopg2://pipeline:pipeline123@postgres:5432/sensor_db
     ports:
       - "6789:6789"
@@ -31,6 +34,7 @@ services:
       postgres:
         condition: service_healthy
     command: ["mage", "start", "sensor_pipeline"]
+    restart: on-failure:5
 
 volumes:
   pgdata:

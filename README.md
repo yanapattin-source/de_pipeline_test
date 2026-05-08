@@ -1,4 +1,5 @@
 # Pipeline Test — Sensor Data Pipeline
+
 ### This Readme.md Co-Writing with AI
 
 A containerized data pipeline that generates sensor reading data and loads it into a PostgreSQL star schema, orchestrated by Mage.ai.
@@ -36,7 +37,9 @@ docker compose up -d
 
 This starts:
 - **PostgreSQL** on port 5432 (schema auto-created on first start)
-- **Mage.ai** on port 6789 (web UI)
+- **Mage.ai** on port 6789 (web UI, authentication disabled for local dev)
+
+> **Note:** Authentication is disabled via `REQUIRE_USER_AUTHENTICATION=0` in docker-compose.yml. No login screen — Mage opens directly.
 
 ### 3. Run the Pipeline
 
@@ -44,7 +47,7 @@ Open Mage UI at **http://localhost:6789**
 
 1. Go to **Pipelines** → **load_sensor_data**
 2. Click **Run**
-3. For each day in January 2023, set the `day` parameter (e.g., `"2023-01-01"`)
+3. For each day in January 2023, set the `day` runtime variable (e.g., `"2023-01-01"`)
 4. Or run all 31 days via the backfill/batch run feature
 
 Pipeline completes each day in ~1-2 minutes. Full month loads in under 30 minutes.
@@ -74,6 +77,13 @@ See [`diagrams/schema.md`](diagrams/schema.md) for the full ER diagram (Mermaid 
 [Parquet Files] → [Load Daily Batch] → [Normalize to Star Schema] → [Upsert to PostgreSQL]
      44,640 files    data_loader          transformer               data_exporter
 ```
+
+**How blocks connect:**
+1. **load_parquet_batch** (data_loader) — reads Parquet files for a given day, returns `{"df": DataFrame, "day": str}`
+2. **normalize_sensor_data** (transformer) — receives the dict, splits into dimension + fact DataFrames
+3. **load_to_postgres** (data_exporter) — receives the dict, upserts dimensions, bulk-inserts facts into PostgreSQL
+
+Runtime variables (like `day`) are passed via `**kwargs` in each block's function signature.
 
 ## Extending the Pipeline
 
@@ -117,7 +127,10 @@ The data loader block pattern works with any format. Just create a new data load
 ```python
 # mage/sensor_pipeline/data_loaders/load_csv_batch.py
 import pandas as pd
-from mage_ai.data_preparation.decorators import data_loader
+
+if 'data_loader' not in globals():
+    from mage_ai.data_preparation.decorators import data_loader
+
 
 @data_loader
 def load_csv_batch(**kwargs) -> dict:
@@ -155,9 +168,11 @@ Every pipeline is independent — you can have multiple pipelines writing to dif
 
 ```bash
 docker compose down
-# To remove data volumes:
+# To remove data volumes (destroys all data!):
 docker compose down -v
 ```
+
+**Data persistence:** Regular `docker compose down` keeps your data. The PostgreSQL data lives in a named Docker volume (`pgdata`). Only `down -v` removes it.
 
 ## Security Note
 
@@ -168,7 +183,7 @@ This project uses hardcoded credentials (`pipeline123`) in `docker-compose.yml` 
 1. **Change the default password** — replace `pipeline123` in these locations:
    - `docker-compose.yml` → `POSTGRES_PASSWORD` and `MAGE_DATABASE_CONNECTION_URL`
    - `mage/sensor_pipeline/data_exporters/load_to_postgres.py` → `DB_URL` fallback string
-   - `mage/sensor_pipeline/io_config.yaml` → PostgreSQL password
+   - `mage/sensor_pipeline/io_config.yaml` → `POSTGRES_PASSWORD`
 
 2. **Use environment variables** — create a `.env` file (already gitignored):
    ```bash
@@ -187,16 +202,27 @@ This project uses hardcoded credentials (`pipeline123`) in `docker-compose.yml` 
 
 ```
 ├── docker-compose.yml     # Infrastructure definition
-├── Dockerfile             # Mage.ai custom image
+├── Dockerfile             # Mage.ai custom image with dependencies
 ├── schema.sql             # PostgreSQL DDL (auto-run on first start)
 ├── sampledata.py          # Data generation script
-├── requirements.txt       # Python dependencies
+├── requirements.txt       # Python dependencies (minimum versions)
 ├── mage/                  # Mage.ai project
 │   └── sensor_pipeline/
-│       ├── pipelines/     # Pipeline definitions
-│       ├── data_loaders/  # Read Parquet files
-│       ├── transformers/  # Normalize to star schema
-│       └── data_exporters/# Write to PostgreSQL
-├── diagrams/              # Schema diagram
+│       ├── __init__.py         # Project package marker
+│       ├── io_config.yaml      # PostgreSQL connection config
+│       ├── metadata.yaml       # Project metadata
+│       ├── pipelines/
+│       │   └── load_sensor_data/
+│       │       ├── __init__.py          # Empty (Mage convention)
+│       │       └── metadata.yaml        # Pipeline block definitions
+│       ├── data_loaders/
+│       │   └── load_parquet_batch.py     # Reads daily Parquet files
+│       ├── transformers/
+│       │   └── normalize_sensor_data.py # Splits into star schema parts
+│       └── data_exporters/
+│           └── load_to_postgres.py       # Upserts dimensions + bulk-inserts facts
+├── diagrams/
+│   └── schema.md          # ER diagram (Mermaid format)
+├── Generate Data.ipynb    # Jupyter notebook version of sampledata.py
 └── README.md
 ```

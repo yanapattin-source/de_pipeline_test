@@ -5,3 +5,5 @@ __pycache__/
 .DS_Store
 .ipynb_checkpoints/
 mage/sensor_pipeline/.terraform/
+mage/sensor_pipeline/.cache/
+mage/sensor_pipeline/.ssh_tunnel/

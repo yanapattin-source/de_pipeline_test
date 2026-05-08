@@ -1,11 +1,9 @@
 version: 0.1.1
-profiles:
-  default:
-    postgres:
-      connector: postgres
-      config:
-        host: postgres
-        port: 5432
-        database: sensor_db
-        user: pipeline
-        password: pipeline123
+default:
+  POSTGRES_CONNECT_TIMEOUT: 10
+  POSTGRES_DBNAME: sensor_db
+  POSTGRES_SCHEMA: public
+  POSTGRES_USER: pipeline
+  POSTGRES_PASSWORD: pipeline123
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432

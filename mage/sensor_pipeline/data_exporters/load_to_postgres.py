@@ -1,7 +1,9 @@
 import os
 import pandas as pd
 from sqlalchemy import create_engine, text, Table, MetaData, insert
-from mage_ai.data_preparation.decorators import data_exporter
+
+if 'data_exporter' not in globals():
+    from mage_ai.data_preparation.decorators import data_exporter
 
 DB_URL = os.environ.get(
     "MAGE_DATABASE_CONNECTION_URL",
