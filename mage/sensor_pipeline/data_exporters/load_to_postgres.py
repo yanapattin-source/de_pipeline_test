@@ -16,12 +16,18 @@ DB_URL = os.environ.get(
     "postgresql+psycopg2://pipeline:pipeline123@postgres:5432/sensor_db",
 )
 SCHEMA = os.environ.get("POSTGRES_SCHEMA", "warehouse")
-LOAD_MODE = os.environ.get("LOAD_MODE", "full_reload").lower()
+LOAD_MODE = os.environ.get("LOAD_MODE", "incremental").lower()
 FULL_RELOAD = LOAD_MODE in ("full_reload", "full", "truncate")
 MANAGE_FACT_INDEXES = os.environ.get("MANAGE_FACT_INDEXES", "true").lower() in (
     "1",
     "true",
     "yes",
+)
+INDEX_MAINTENANCE_WORK_MEM = os.environ.get(
+    "INDEX_MAINTENANCE_WORK_MEM", "1GB"
+)
+INDEX_MAX_PARALLEL_WORKERS = os.environ.get(
+    "INDEX_MAX_PARALLEL_WORKERS", "4"
 )
 TRUNCATE_DIMENSIONS_ON_FULL_RELOAD = os.environ.get(
     "TRUNCATE_DIMENSIONS_ON_FULL_RELOAD",
@@ -33,7 +39,7 @@ VALIDATE_PER_DAY_COUNTS = os.environ.get("VALIDATE_PER_DAY_COUNTS", "true").lowe
     "yes",
 )
 
-APPLY_SCHEMA_SQL = os.environ.get("APPLY_SCHEMA_SQL", "false").lower() in (
+APPLY_SCHEMA_SQL = os.environ.get("APPLY_SCHEMA_SQL", "true").lower() in (
     "1",
     "true",
     "yes",
@@ -74,7 +80,7 @@ FACT_INDEXES = [
 
 
 def _apply_schema_sql_if_requested() -> None:
-    """Optional helper for non-Docker runs. Docker compose initializes schema.sql."""
+    """Apply schema.sql DDL if APPLY_SCHEMA_SQL=true and SCHEMA_SQL_PATH is set."""
     schema_file = os.environ.get("SCHEMA_SQL_PATH")
     if not APPLY_SCHEMA_SQL or not schema_file:
         return
@@ -109,48 +115,148 @@ def _configure_duckdb(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(f"SET threads = {threads}")
 
 
-def _export_parquet_to_csv(
-    con: duckdb.DuckDBPyConnection,
-    parquet_path: str,
-    csv_path: str,
-) -> None:
-    Path(csv_path).unlink(missing_ok=True)
-    con.execute(
+def _collect_and_upsert_all_dimensions(duck_con, daily_files, cursor):
+    """Extract all unique dimension values from all daily parquet files, upsert once."""
+    from psycopg2.extras import execute_values
+
+    t0 = time.time()
+    all_depts = set()
+    all_prods = set()
+    all_sensors = set()
+
+    for item in daily_files:
+        rows = duck_con.execute(
+            f"""
+            SELECT DISTINCT department_name, sensor_serial, product_name
+            FROM read_parquet(?)
+            WHERE {VALID_ROW_FILTER}
+            """,
+            [item["load_path"]],
+        ).fetchall()
+        for dept, sensor, prod in rows:
+            if dept:
+                all_depts.add(dept)
+            if prod:
+                all_prods.add(prod)
+            if sensor and dept:
+                all_sensors.add((sensor, dept))
+
+    if all_depts:
+        execute_values(
+            cursor,
+            f"INSERT INTO {SCHEMA}.dim_department (department_name) VALUES %s ON CONFLICT (department_name) DO NOTHING",
+            [(d,) for d in all_depts],
+        )
+
+    if all_prods:
+        execute_values(
+            cursor,
+            f"INSERT INTO {SCHEMA}.dim_product (product_name) VALUES %s ON CONFLICT (product_name) DO NOTHING",
+            [(p,) for p in all_prods],
+        )
+
+    cursor.execute(f"SELECT department_id, department_name FROM {SCHEMA}.dim_department")
+    dept_map = {row[1]: row[0] for row in cursor}
+
+    if all_sensors:
+        execute_values(
+            cursor,
+            f"INSERT INTO {SCHEMA}.dim_sensor (sensor_serial, department_id) VALUES %s ON CONFLICT (sensor_serial, department_id) DO NOTHING",
+            [(serial, dept_map[dept]) for serial, dept in all_sensors],
+        )
+
+    print(
+        f"Dimensions collected & upserted: "
+        f"{len(all_depts)} departments, {len(all_prods)} products, "
+        f"{len(all_sensors)} sensors in {time.time() - t0:.1f}s"
+    )
+
+
+def _fetch_dimension_maps(cursor):
+    """Fetch all dimension ID→name mappings from Postgres."""
+    cursor.execute(f"SELECT department_id, department_name FROM {SCHEMA}.dim_department")
+    dept_rows = cursor.fetchall()
+
+    cursor.execute(f"SELECT product_id, product_name FROM {SCHEMA}.dim_product")
+    prod_rows = cursor.fetchall()
+
+    cursor.execute(f"SELECT sensor_id, sensor_serial, department_id FROM {SCHEMA}.dim_sensor")
+    sensor_rows = cursor.fetchall()
+
+    return dept_rows, prod_rows, sensor_rows
+
+
+def _register_dims_in_duckdb(duck_con, dept_rows, prod_rows, sensor_rows):
+    """Create DuckDB in-memory dimension tables from Postgres rows."""
+    duck_con.execute("DROP TABLE IF EXISTS _dept")
+    duck_con.execute("CREATE TABLE _dept (department_id INTEGER, department_name VARCHAR)")
+    duck_con.executemany("INSERT INTO _dept VALUES (?, ?)", [(r[0], r[1]) for r in dept_rows])
+
+    duck_con.execute("DROP TABLE IF EXISTS _prod")
+    duck_con.execute("CREATE TABLE _prod (product_id INTEGER, product_name VARCHAR)")
+    duck_con.executemany("INSERT INTO _prod VALUES (?, ?)", [(r[0], r[1]) for r in prod_rows])
+
+    duck_con.execute("DROP TABLE IF EXISTS _sensor")
+    duck_con.execute("CREATE TABLE _sensor (sensor_id INTEGER, sensor_serial VARCHAR, department_id INTEGER)")
+    duck_con.executemany("INSERT INTO _sensor VALUES (?, ?, ?)", [(r[0], r[1], r[2]) for r in sensor_rows])
+
+
+def _duckdb_resolve_and_copy(duck_con, parquet_path, cursor, csv_dir, day):
+    """
+    DuckDB reads parquet → JOINs dims → native CSV → Postgres COPY.
+    DuckDB's C++ CSV writer, no Python csv overhead.
+    Returns row count inserted.
+    """
+    csv_path = f"{csv_dir}/{day}.csv"
+
+    duck_con.execute(
         f"""
         COPY (
             SELECT
-                department_name,
-                sensor_serial,
-                product_name,
-                create_at,
-                product_expire
-            FROM read_parquet(?)
-            WHERE {VALID_ROW_FILTER}
+                s.sensor_id,
+                p.product_id,
+                d.department_id,
+                raw.create_at,
+                raw.product_expire
+            FROM read_parquet(?) AS raw
+            JOIN _dept d ON d.department_name = raw.department_name
+            JOIN _prod p ON p.product_name = raw.product_name
+            JOIN _sensor s ON s.sensor_serial = raw.sensor_serial
+                AND s.department_id = d.department_id
+            WHERE raw.department_name IS NOT NULL
+                AND raw.sensor_serial IS NOT NULL
+                AND raw.product_name IS NOT NULL
+                AND raw.create_at IS NOT NULL
+                AND raw.product_expire IS NOT NULL
         ) TO {_sql_string(csv_path)} (
             FORMAT CSV,
             HEADER FALSE,
             DELIMITER ',',
-            QUOTE '"',
-            ESCAPE '"',
             NULL '\\N'
         )
         """,
         [parquet_path],
     )
 
+    with open(csv_path, "r", encoding="utf-8") as f:
+        cursor.copy_expert(
+            f"COPY {SCHEMA}.fact_sensor_reading "
+            "(sensor_id, product_id, department_id, create_at, product_expire) "
+            "FROM STDIN WITH (FORMAT CSV, NULL '\\N')",
+            f,
+        )
 
-def _create_temp_stage(cursor) -> None:
+    Path(csv_path).unlink(missing_ok=True)
+
+    # COPY doesn't update cursor.rowcount; count rows for this day
+    start_ts = f"{day} 00:00:00"
+    end_ts = f"{day} 23:59:59"
     cursor.execute(
-        """
-        CREATE TEMP TABLE stg_sensor_reading (
-            department_name VARCHAR(32) NOT NULL,
-            sensor_serial VARCHAR(64) NOT NULL,
-            product_name VARCHAR(16) NOT NULL,
-            create_at TIMESTAMP NOT NULL,
-            product_expire TIMESTAMP NOT NULL
-        ) ON COMMIT PRESERVE ROWS
-        """
+        f"SELECT count(*) FROM {SCHEMA}.fact_sensor_reading "
+        "WHERE create_at >= %s AND create_at <= %s",
+        (start_ts, end_ts),
     )
+    return cursor.fetchone()[0]
 
 
 def _truncate_for_full_reload(cursor) -> None:
@@ -173,108 +279,25 @@ def _truncate_for_full_reload(cursor) -> None:
         )
 
 
-def _delete_existing_day(cursor, day: str) -> int:
-    day_dt = datetime.strptime(day, "%Y-%m-%d")
-    next_day = day_dt + timedelta(days=1)
-    cursor.execute(
-        f"""
-        DELETE FROM {SCHEMA}.fact_sensor_reading
-        WHERE create_at >= %s AND create_at < %s
-        """,
-        (day_dt, next_day),
-    )
-    return cursor.rowcount
-
-
 def _drop_fact_indexes(cursor) -> None:
     for index_name, _ in FACT_INDEXES:
         cursor.execute(f"DROP INDEX IF EXISTS {SCHEMA}.{index_name}")
 
 
 def _create_fact_indexes(cursor) -> None:
-    for _, create_sql in FACT_INDEXES:
+    t0 = time.time()
+    cursor.execute(
+        f"SET LOCAL maintenance_work_mem = '{INDEX_MAINTENANCE_WORK_MEM}'"
+    )
+    cursor.execute(
+        f"SET LOCAL max_parallel_maintenance_workers = {INDEX_MAX_PARALLEL_WORKERS}"
+    )
+    for index_name, create_sql in FACT_INDEXES:
+        t_idx = time.time()
         cursor.execute(create_sql)
+        print(f"  Index {index_name}: created in {time.time() - t_idx:.1f}s")
+    print(f"All indexes created in {time.time() - t0:.1f}s")
 
-
-def _copy_csv_to_stage(cursor, csv_path: str) -> None:
-    with open(csv_path, "r", encoding="utf-8") as f:
-        cursor.copy_expert(
-            """
-            COPY stg_sensor_reading
-                (department_name, sensor_serial, product_name, create_at, product_expire)
-            FROM STDIN WITH (FORMAT CSV, NULL '\\N')
-            """,
-            f,
-        )
-
-
-def _load_stage_to_star_schema(cursor) -> int:
-    cursor.execute("SELECT count(*) FROM stg_sensor_reading")
-    stage_count = int(cursor.fetchone()[0])
-
-    if stage_count == 0:
-        return 0
-
-    cursor.execute(
-        f"""
-        INSERT INTO {SCHEMA}.dim_department (department_name)
-        SELECT DISTINCT department_name
-        FROM stg_sensor_reading
-        ON CONFLICT (department_name) DO NOTHING
-        """
-    )
-
-    cursor.execute(
-        f"""
-        INSERT INTO {SCHEMA}.dim_product (product_name)
-        SELECT DISTINCT product_name
-        FROM stg_sensor_reading
-        ON CONFLICT (product_name) DO NOTHING
-        """
-    )
-
-    cursor.execute(
-        f"""
-        INSERT INTO {SCHEMA}.dim_sensor (sensor_serial, department_id)
-        SELECT DISTINCT
-            stg.sensor_serial,
-            dept.department_id
-        FROM stg_sensor_reading AS stg
-        JOIN {SCHEMA}.dim_department AS dept
-            ON dept.department_name = stg.department_name
-        ON CONFLICT (sensor_serial, department_id) DO NOTHING
-        """
-    )
-
-    cursor.execute(
-        f"""
-        INSERT INTO {SCHEMA}.fact_sensor_reading
-            (sensor_id, product_id, department_id, create_at, product_expire)
-        SELECT
-            sensor.sensor_id,
-            product.product_id,
-            dept.department_id,
-            stg.create_at,
-            stg.product_expire
-        FROM stg_sensor_reading AS stg
-        JOIN {SCHEMA}.dim_department AS dept
-            ON dept.department_name = stg.department_name
-        JOIN {SCHEMA}.dim_product AS product
-            ON product.product_name = stg.product_name
-        JOIN {SCHEMA}.dim_sensor AS sensor
-            ON sensor.sensor_serial = stg.sensor_serial
-           AND sensor.department_id = dept.department_id
-        """
-    )
-    inserted_count = cursor.rowcount
-
-    if inserted_count != stage_count:
-        raise ValueError(
-            f"Fact insert mismatch: staged {stage_count:,}, inserted {inserted_count:,}. "
-            "This means dimension join accuracy failed."
-        )
-
-    return inserted_count
 
 
 def _analyze_tables(cursor) -> None:
@@ -345,16 +368,12 @@ def _validate_counts(cursor, data: dict, loaded_rows: int) -> None:
 @data_exporter
 def load_to_postgres(data: dict, **kwargs) -> dict:
     """
-    Fast KISS loader.
-
-    One Mage exporter run:
-    - uses DuckDB only to convert parquet to daily CSV files
-    - COPYs CSV into a Postgres TEMP table
-    - upserts dimensions with SQL
-    - inserts facts with SQL joins
-    - validates source counts against Postgres counts
-
-    No permanent staging table and no giant pandas DataFrame.
+    Fast KISS loader — DuckDB FK resolution + direct COPY.
+    
+    1. Collect all dimension values → upsert once
+    2. Fetch dim ID maps → register in DuckDB
+    3. Per day: DuckDB JOIN + native CSV → Postgres COPY directly into fact
+    4. No staging table, no Postgres JOINs, no Python csv.writer
     """
     daily_files = data.get("daily_files", [])
     expected_rows = int(data.get("expected_rows") or 0)
@@ -365,8 +384,8 @@ def load_to_postgres(data: dict, **kwargs) -> dict:
 
     _apply_schema_sql_if_requested()
 
-    tmp_dir = Path(os.environ.get("POSTGRES_LOAD_TMP_DIR", "/tmp/sensor_pipeline_csv"))
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    csv_dir = "/tmp/sensor_pipeline_csv"
+    Path(csv_dir).mkdir(parents=True, exist_ok=True)
 
     loaded_rows = 0
     started_at = time.time()
@@ -386,46 +405,51 @@ def load_to_postgres(data: dict, **kwargs) -> dict:
             _truncate_for_full_reload(cursor)
         raw_conn.commit()
 
-        if MANAGE_FACT_INDEXES:
-            print("Dropping fact indexes before bulk load.")
+        if MANAGE_FACT_INDEXES and FULL_RELOAD:
+            print("Dropping fact indexes before full reload bulk load.")
             _drop_fact_indexes(cursor)
             raw_conn.commit()
 
-        _create_temp_stage(cursor)
+        # --- Phase 1: Collect & upsert all dimensions once ---
+        _collect_and_upsert_all_dimensions(duck_con, daily_files, cursor)
         raw_conn.commit()
 
+        # --- Phase 2: Fetch dim maps, register in DuckDB ---
+        dept_rows, prod_rows, sensor_rows = _fetch_dimension_maps(cursor)
+        _register_dims_in_duckdb(duck_con, dept_rows, prod_rows, sensor_rows)
+
+        # --- Phase 3: Per-day idempotent delete (incremental mode) ---
+        if not FULL_RELOAD:
+            for item in daily_files:
+                day = item["day"]
+                day_dt = datetime.strptime(day, "%Y-%m-%d")
+                next_day = day_dt + timedelta(days=1)
+                cursor.execute(
+                    f"DELETE FROM {SCHEMA}.fact_sensor_reading "
+                    "WHERE create_at >= %s AND create_at < %s",
+                    (day_dt, next_day),
+                )
+            raw_conn.commit()
+
+        # --- Phase 4: DuckDB JOIN + direct COPY per day ---
         for index, item in enumerate(daily_files, start=1):
             day = item["day"]
             load_path = item["load_path"]
-            csv_path = str(tmp_dir / f"sensor_{day}.csv")
-            t0 = time.time()
+            t_day = time.time()
 
-            try:
-                cursor.execute("TRUNCATE stg_sensor_reading")
+            inserted = _duckdb_resolve_and_copy(
+                duck_con, load_path, cursor, csv_dir, day
+            )
+            raw_conn.commit()
+            loaded_rows += inserted
 
-                if not FULL_RELOAD:
-                    deleted = _delete_existing_day(cursor, day)
-                    if deleted:
-                        print(f"{day}: deleted {deleted:,} existing fact rows")
+            print(
+                f"Day {index}/{len(daily_files)} {day}: "
+                f"{inserted:,} rows in {time.time() - t_day:.1f}s"
+            )
 
-                _export_parquet_to_csv(duck_con, load_path, csv_path)
-                _copy_csv_to_stage(cursor, csv_path)
-                inserted = _load_stage_to_star_schema(cursor)
-                raw_conn.commit()
-
-                loaded_rows += inserted
-                print(
-                    f"Loaded {index}/{len(daily_files)} {day}: "
-                    f"{inserted:,} rows in {time.time() - t0:.1f}s"
-                )
-            except Exception:
-                raw_conn.rollback()
-                raise
-            finally:
-                Path(csv_path).unlink(missing_ok=True)
-
-        if MANAGE_FACT_INDEXES:
-            print("Recreating fact indexes after bulk load.")
+        if MANAGE_FACT_INDEXES and FULL_RELOAD:
+            print("Recreating fact indexes after full reload bulk load.")
             _create_fact_indexes(cursor)
             raw_conn.commit()
 
@@ -435,6 +459,7 @@ def load_to_postgres(data: dict, **kwargs) -> dict:
 
         _validate_counts(cursor, data, loaded_rows)
         raw_conn.commit()
+
     finally:
         duck_con.close()
         if cursor:
@@ -444,7 +469,7 @@ def load_to_postgres(data: dict, **kwargs) -> dict:
 
     elapsed = time.time() - started_at
     print(
-        f"Loaded {loaded_rows:,}/{expected_rows:,} expected rows "
+        f"Loaded {loaded_rows:,}/{expected_rows:,} rows "
         f"across {len(daily_files)} day(s) in {elapsed / 60:.1f} minutes."
     )
 

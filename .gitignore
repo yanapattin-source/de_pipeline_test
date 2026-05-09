@@ -8,3 +8,4 @@ mage/sensor_pipeline/.terraform/
 mage/sensor_pipeline/.cache/
 mage/sensor_pipeline/.ssh_tunnel/
 mage/mage_data/
+VIDEO_STEPS.md
