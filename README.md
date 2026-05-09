@@ -2,6 +2,9 @@
 
 ### This Readme.md Co-Writing with AI
 
+## Video
+https://drive.google.com/file/d/1LSqTL8FfqLII1qGXePAtCGAtu6UM0IP6/view?usp=sharing
+
 A containerized data pipeline that generates sensor reading data and loads it into a PostgreSQL star schema, orchestrated by Mage.ai.
 
 ## Architecture
