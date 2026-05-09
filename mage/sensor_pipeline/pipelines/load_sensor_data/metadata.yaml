@@ -28,3 +28,5 @@ name: load_sensor_data
 type: python
 uuid: load_sensor_data
 widgets: []
+concurrency_config:
+  block_run_limit: 1

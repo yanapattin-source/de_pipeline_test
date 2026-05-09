@@ -5,6 +5,14 @@ services:
       POSTGRES_DB: sensor_db
       POSTGRES_USER: pipeline
       POSTGRES_PASSWORD: pipeline123
+    command: >
+      -c max_wal_size=4GB
+      -c checkpoint_timeout=15min
+      -c wal_buffers=64MB
+      -c maintenance_work_mem=512MB
+      -c max_worker_processes=16
+      -c max_parallel_workers=8
+      -c shared_buffers=512MB
     ports:
       - "5432:5432"
     volumes:
@@ -30,11 +38,14 @@ services:
       DEFAULT_OWNER_PASSWORD: "admin"
       DEFAULT_OWNER_USERNAME: "admin"
       MAGE_DATABASE_CONNECTION_URL: postgresql+psycopg2://pipeline:pipeline123@postgres:5432/sensor_db
+      SCHEMA_SQL_PATH: /home/src/schema.sql
+      DATA_DIR: /home/src/data_sample
     ports:
       - "6789:6789"
     volumes:
       - ./mage:/home/src
       - ./data_sample:/home/src/data_sample:ro
+      - ./schema.sql:/home/src/schema.sql:ro
     depends_on:
       postgres:
         condition: service_healthy
